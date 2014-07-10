@@ -1,7 +1,7 @@
 <?php
 /**
  * @license   http://opensource.org/licenses/BSD-3-Clause BSD-3-Clause
- * @copyright Copyright (c) 2013 Zend Technologies USA Inc. (http://www.zend.com)
+ * @copyright Copyright (c) 2014 Zend Technologies USA Inc. (http://www.zend.com)
  */
 
 namespace ZFTest\Apigility\Admin;
@@ -49,8 +49,8 @@ class Bootstrap
                 'Zend\Loader\StandardAutoloader' => array(
                     'autoregister_zf' => true,
                     'namespaces' => array(
-                        'ZF\Apigility\Admin' => __DIR__ . '/../src/ZF/Apigility/Admin/',
-                        __NAMESPACE__ => __DIR__ . '/ZFTest/Apigility/Admin/',
+                        'ZF\Apigility\Admin' => __DIR__ . '/../src/',
+                        __NAMESPACE__ => __DIR__,
                         'Test' => __DIR__ . '/../vendor/Test/',
                     ),
                 ),

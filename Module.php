@@ -1,23 +1,27 @@
 <?php
 /**
  * @license   http://opensource.org/licenses/BSD-3-Clause BSD-3-Clause
- * @copyright Copyright (c) 2013 Zend Technologies USA Inc. (http://www.zend.com)
+ * @copyright Copyright (c) 2014 Zend Technologies USA Inc. (http://www.zend.com)
  */
 
 namespace ZF\Apigility\Admin;
 
-use Zend\Config\Writer\PhpArray as PhpArrayWriter;
 use Zend\Mvc\MvcEvent;
 use Zend\Mvc\Router\RouteMatch;
 use ZF\Configuration\ConfigResource;
 use ZF\Hal\Link\Link;
 use ZF\Hal\Link\LinkCollection;
-use ZF\Hal\Resource;
+use ZF\Hal\Entity;
 use ZF\Hal\View\HalJsonModel;
 use Zend\ServiceManager\Exception\ServiceNotCreatedException;
 
 class Module
 {
+    /**
+     * @var MvcEvent
+     */
+    protected $mvcEvent;
+
     /**
      * @var \Closure
      */
@@ -33,15 +37,21 @@ class Module
         $app      = $e->getApplication();
         $this->sm = $app->getServiceManager();
         $events   = $app->getEventManager();
-        $events->attach('render', array($this, 'onRender'), 100);
+        $events->attach(MvcEvent::EVENT_RENDER, array($this, 'onRender'), 100);
+        $events->attach(MvcEvent::EVENT_FINISH, array($this, 'onFinish'), 1000);
+        $events->attachAggregate(
+            $this->sm->get('ZF\Apigility\Admin\Listener\CryptFilterListener')
+        );
     }
 
     public function getAutoloaderConfig()
     {
+        $this->disableOpCache();
+
         return array(
-            'Zend\Loader\StandardAutoloader' => array(
+            'ZF\Apigility\Autoloader' => array(
                 'namespaces' => array(
-                    __NAMESPACE__ => __DIR__ . '/src/ZF/Apigility/Admin/',
+                    __NAMESPACE__ => __DIR__ . '/src/',
                 ),
             ),
         );
@@ -77,7 +87,7 @@ class Module
                     );
                 }
                 $config = $services->get('Config');
-                $writer = new PhpArrayWriter();
+                $writer = $services->get('ZF\Configuration\ConfigWriter');
 
                 $global = new ConfigResource($config, 'config/autoload/global.php', $writer);
                 $local  = new ConfigResource($config, 'config/autoload/local.php', $writer);
@@ -98,6 +108,27 @@ class Module
 
                 return new Model\AuthorizationModelFactory($moduleUtils, $configFactory, $moduleModel);
             },
+            'ZF\Apigility\Admin\Model\ContentNegotiationModel' => function ($services) {
+                if (!$services->has('Config')) {
+                    throw new ServiceNotCreatedException(
+                        'Cannot create ZF\Apigility\Admin\Model\ContentNegotiationModel service because Config service is not present'
+                    );
+                }
+                $config = $services->get('Config');
+                $writer = $services->get('ZF\Configuration\ConfigWriter');
+
+                $global = new ConfigResource($config, 'config/autoload/global.php', $writer);
+                return new Model\ContentNegotiationModel($global);
+            },
+            'ZF\Apigility\Admin\Model\ContentNegotiationResource' => function ($services) {
+                if (!$services->has('ZF\Apigility\Admin\Model\ContentNegotiationModel')) {
+                    throw new ServiceNotCreatedException(
+                        'Cannot create ZF\Apigility\Admin\Model\ContentNegotiationResource service because ZF\Apigility\Admin\Model\ContentNegotiationModel service is not present'
+                    );
+                }
+                $model = $services->get('ZF\Apigility\Admin\Model\ContentNegotiationModel');
+                return new Model\ContentNegotiationResource($model);
+            },
             'ZF\Apigility\Admin\Model\DbAdapterModel' => function ($services) {
                 if (!$services->has('Config')) {
                     throw new ServiceNotCreatedException(
@@ -105,7 +136,7 @@ class Module
                     );
                 }
                 $config = $services->get('Config');
-                $writer = new PhpArrayWriter();
+                $writer = $services->get('ZF\Configuration\ConfigWriter');
 
                 $global = new ConfigResource($config, 'config/autoload/global.php', $writer);
                 $local  = new ConfigResource($config, 'config/autoload/local.php', $writer);
@@ -196,26 +227,49 @@ class Module
                         'ZF\Apigility\Admin\Model\RestServiceResource is missing one or more dependencies'
                     );
                 }
+                if (!$services->has('ZF\Apigility\Admin\Model\InputFilterModel')) {
+                    throw new ServiceNotCreatedException(
+                        'ZF\Apigility\Admin\Model\RestServiceResource is missing one or more dependencies'
+                    );
+                }
                 $factory = $services->get('ZF\Apigility\Admin\Model\RestServiceModelFactory');
-                return new Model\RestServiceResource($factory);
+                $inputFilterModel = $services->get('ZF\Apigility\Admin\Model\InputFilterModel');
+                $documentationModel = $services->get('ZF\Apigility\Admin\Model\DocumentationModel');
+                return new Model\RestServiceResource($factory, $inputFilterModel, $documentationModel);
             },
             'ZF\Apigility\Admin\Model\RpcServiceResource' => function ($services) {
                 if (!$services->has('ZF\Apigility\Admin\Model\RpcServiceModelFactory')) {
                     throw new ServiceNotCreatedException(
-                        'ZF\Apigility\Admin\Model\RpcServiceResource is missing one or more dependencies'
+                        'ZF\Apigility\Admin\Model\RpcServiceResource is missing RpcServiceModelFactory dependency'
+                    );
+                }
+                if (!$services->has('ZF\Apigility\Admin\Model\InputFilterModel')) {
+                    throw new ServiceNotCreatedException(
+                        'ZF\Apigility\Admin\Model\RpcServiceResource is missing InputFilterModel dependency'
+                    );
+                }
+                if (!$services->has('ControllerManager')) {
+                    throw new ServiceNotCreatedException(
+                        'ZF\Apigility\Admin\Model\RpcServiceResource is missing ControllerManager dependency'
                     );
                 }
                 $factory = $services->get('ZF\Apigility\Admin\Model\RpcServiceModelFactory');
-                return new Model\RpcServiceResource($factory);
+                $inputFilterModel = $services->get('ZF\Apigility\Admin\Model\InputFilterModel');
+                $controllerManager = $services->get('ControllerManager');
+                $documentationModel = $services->get('ZF\Apigility\Admin\Model\DocumentationModel');
+                return new Model\RpcServiceResource($factory, $inputFilterModel, $controllerManager, $documentationModel);
             },
             'ZF\Apigility\Admin\Model\VersioningModelFactory' => function ($services) {
-                if (!$services->has('ZF\Configuration\ConfigResourceFactory')) {
+                if (!$services->has('ZF\Configuration\ConfigResourceFactory')
+                    || !$services->has('ZF\Configuration\ModuleUtils')
+                ) {
                     throw new ServiceNotCreatedException(
                         'ZF\Apigility\Admin\Model\VersioningModelFactory is missing one or more dependencies from ZF\Configuration'
                     );
                 }
                 $configFactory = $services->get('ZF\Configuration\ConfigResourceFactory');
-                return new Model\VersioningModelFactory($configFactory);
+                $moduleUtils   = $services->get('ZF\Configuration\ModuleUtils');
+                return new Model\VersioningModelFactory($configFactory, $moduleUtils);
             },
         ));
     }
@@ -232,6 +286,14 @@ class Module
                 $services = $controllers->getServiceLocator();
                 $factory  = $services->get('ZF\Apigility\Admin\Model\AuthorizationModelFactory');
                 return new Controller\AuthorizationController($factory);
+            },
+            'ZF\Apigility\Admin\Controller\Config' => function ($controllers) {
+                $services = $controllers->getServiceLocator();
+                return new Controller\ConfigController($services->get('ZF\Configuration\ConfigResource'));
+            },
+            'ZF\Apigility\Admin\Controller\ModuleConfig' => function ($controllers) {
+                $services = $controllers->getServiceLocator();
+                return new Controller\ModuleConfigController($services->get('ZF\Configuration\ConfigResourceFactory'));
             },
             'ZF\Apigility\Admin\Controller\ModuleCreation' => function ($controllers) {
                 $services = $controllers->getServiceLocator();
@@ -265,28 +327,48 @@ class Module
             return;
         }
 
-        $controller = $matches->getParam('controller', false);
-        if ($controller != 'ZF\Apigility\Admin\Controller\Module') {
-            return;
-        }
-
         $result = $e->getResult();
         if (!$result instanceof HalJsonModel) {
             return;
         }
 
-        if ($result->isResource()) {
-            $this->initializeUrlHelper();
-            $this->injectServiceLinks($result->getPayload(), $result);
+        $viewHelpers = $this->sm->get('ViewHelperManager');
+        $halPlugin = $viewHelpers->get('hal');
+        $this->initializeUrlHelper();
+
+        if ($result->isEntity()) {
+            $this->injectServiceLinks($result->getPayload(), $result, $e);
+            $halPlugin->getEventManager()->attach('renderEntity', array($this, 'onRenderEntity'), 10);
             return;
         }
 
         if ($result->isCollection()) {
-            $this->initializeUrlHelper();
-            $viewHelpers = $this->sm->get('ViewHelperManager');
-            $halPlugin   = $viewHelpers->get('hal');
-            $halPlugin->getEventManager()->attach('renderCollection.resource', array($this, 'onRenderCollectionResource'), 10);
+            $this->mvcEvent = $e;
+            $halPlugin->getEventManager()->attach('renderCollection.entity', array($this, 'onRenderCollectionEntity'), 10);
         }
+    }
+
+    /**
+     * Tell browsers not to cache responses from the admin API
+     *
+     * @param  \Zend\Mvc\MvcEvent $e
+     */
+    public function onFinish($e)
+    {
+        $matches = $e->getRouteMatch();
+        if (!$matches instanceof RouteMatch) {
+            // In 404's, we do not have a route match... nor do we need to do
+            // anything
+            return;
+        }
+
+        if (! $matches->getParam('is_apigility_admin_api', false)) {
+            // Not part of the Apigility Admin API; nothing to do
+            return;
+        }
+
+        $response = $e->getResponse();
+        $response->getHeaders()->addHeaderLine('Cache-Control', 'no-cache');
     }
 
     protected function initializeUrlHelper()
@@ -306,40 +388,102 @@ class Module
     /**
      * Inject links for the service services of a module
      *
-     * @param  Resource $resource
+     * @param  Entity $entity
      * @param  HalJsonModel $model
+     * @param  \Zend\Mvc\MvcEvent $model
      */
-    protected function injectServiceLinks(Resource $resource, HalJsonModel $model)
+    protected function injectServiceLinks(Entity $halEntity, HalJsonModel $model, $e)
     {
-        $module     = $resource->resource;
-        $links      = $resource->getLinks();
-        $moduleName = $module['name'];
+        $entity = $halEntity->entity;
+        $links  = $halEntity->getLinks();
+        if ($entity instanceof Model\ModuleEntity) {
+            return $this->injectModuleResourceRelationalLinks($entity, $links, $model);
+        }
+    }
+
+    protected function injectModuleResourceRelationalLinks(Model\ModuleEntity $module, $links, HalJsonModel $model)
+    {
+        $moduleData = $module->getArrayCopy();
+        $moduleName = $moduleData['name'];
 
         $this->injectLinksForServicesByType('authorization', array(), $links, $moduleName);
 
-        $this->injectLinksForServicesByType('rest', $module['rest'], $links, $moduleName);
-        unset($module['rest']);
+        $this->injectLinksForServicesByType('rest', $moduleData['rest'], $links, $moduleName);
+        unset($moduleData['rest']);
 
-        $this->injectLinksForServicesByType('rpc', $module['rpc'], $links, $moduleName);
-        unset($module['rpc']);
+        $this->injectLinksForServicesByType('rpc', $moduleData['rpc'], $links, $moduleName);
+        unset($moduleData['rpc']);
 
-        $replacement = new Resource($module, $resource->id);
+        $module = new Model\ModuleEntity($module->getNamespace(), array(), array(), $module->isVendor());
+        $module->exchangeArray($moduleData);
+        $replacement = new Entity($module, $moduleName);
         $replacement->setLinks($links);
         $model->setPayload($replacement);
     }
 
+    public function onRenderEntity($e)
+    {
+        $halEntity = $e->getParam('entity');
+        $entity    = $halEntity->entity;
+
+        if ($entity instanceof Model\RestServiceEntity
+            || $entity instanceof Model\RpcServiceEntity
+            || (is_array($entity) && array_key_exists('controller_service_name', $entity))
+        ) {
+            $links = $halEntity->getLinks();
+
+            if ($links->has('input_filter')) {
+                $serviceName = is_array($entity) ? $entity['controller_service_name'] : $entity->controllerServiceName;
+
+                $link   = $links->get('input_filter');
+                $params = $link->getRouteParams();
+                $link->setRouteParams(array_merge($params, array(
+                    'controller_service_name' => $serviceName
+                )));
+            }
+
+            if ($links->has('documentation')) {
+                $serviceName = is_array($entity) ? $entity['controller_service_name'] : $entity->controllerServiceName;
+
+                $link   = $links->get('documentation');
+                $params = $link->getRouteParams();
+                $link->setRouteParams(array_merge($params, array(
+                    'controller_service_name' => $serviceName
+                )));
+            }
+        }
+    }
+
     /**
-     * Inject RPC/REST service links inside module resources that are composed in collections
+     * Inject links into collections
+     *
+     * Currently:
+     * - Inject RPC/REST service links inside module resources that are composed in collections
      *
      * @param  \Zend\EventManager\Event $e
      */
-    public function onRenderCollectionResource($e)
+    public function onRenderCollectionEntity($e)
     {
-        $resource = $e->getParam('resource');
-        if (!$resource instanceof Model\ModuleEntity) {
-            return;
+        $entity = $e->getParam('entity');
+        if ($entity instanceof Model\ModuleEntity) {
+            return $this->injectModuleCollectionRelationalLinks($entity, $e);
         }
 
+        if ($entity instanceof Model\RestServiceEntity
+            || $entity instanceof Model\RpcServiceEntity
+        ) {
+            return $this->injectServiceCollectionRelationalLinks($entity, $e);
+        }
+    }
+
+    /**
+     * Inject relational links into a Module resource
+     *
+     * @param Model\ModuleEntity $resource
+     * @param \Zend\Mvc\MvcEvent $e
+     */
+    public function injectModuleCollectionRelationalLinks(Model\ModuleEntity $resource, $e)
+    {
         $asArray  = $resource->getArrayCopy();
         $module   = $asArray['name'];
         $rest     = $asArray['rest'];
@@ -348,12 +492,12 @@ class Module
         unset($asArray['rest']);
         unset($asArray['rpc']);
 
-        $halResource = new Resource($asArray, $module);
-        $links       = $halResource->getLinks();
+        $halEntity   = new Entity($asArray, $module);
+        $links       = $halEntity->getLinks();
         $links->add(Link::factory(array(
             'rel' => 'self',
             'route' => array(
-                'name' => 'zf-apigility-admin/api/module',
+                'name' => 'zf-apigility/api/module',
                 'params' => array(
                     'name' => $module,
                 ),
@@ -363,7 +507,56 @@ class Module
         $this->injectLinksForServicesByType('rest', $rest, $links, $module);
         $this->injectLinksForServicesByType('rpc', $rpc, $links, $module);
 
-        $e->setParam('resource', $halResource);
+        $e->setParam('entity', $halEntity);
+    }
+
+    public function injectServiceCollectionRelationalLinks($entity, $e)
+    {
+        $module  = $this->mvcEvent->getRouteMatch()->getParam('name');
+        $service = $entity->controllerServiceName;
+        $type    = $this->getServiceType($service);
+
+        $halEntity = new Entity($entity, $service);
+        $links = $halEntity->getLinks();
+
+        // Need to inject the self relational link, as otherwise the HAL plugin
+        // sees we have links, and does not inject one.
+        $links->add(Link::factory(array(
+            'rel' => 'self',
+            'route' => array(
+                'name' => sprintf('zf-apigility/api/module/%s-service', $type),
+                'params' => array(
+                    'name' => $module,
+                    'controller_service_name' => $service,
+                ),
+            ),
+        )));
+
+        // Add the input_filter relational link
+        $links->add(Link::factory(array(
+            'rel' => 'input_filter',
+            'route' => array(
+                'name' => sprintf('zf-apigility/api/module/%s-service/input-filter', $type),
+                'params' => array(
+                    'name' => $module,
+                    'controller_service_name' => $service,
+                ),
+            ),
+        )));
+
+        // Add the documentation relational link
+        $links->add(Link::factory(array(
+            'rel' => 'documentation',
+            'route' => array(
+                'name' => sprintf('zf-apigility/api/module/%s-service/doc', $type),
+                'params' => array(
+                    'name' => $module,
+                    'controller_service_name' => $service,
+                ),
+            ),
+        )));
+
+        $e->setParam('entity', $halEntity);
     }
 
     /**
@@ -382,7 +575,7 @@ class Module
         if (in_array($type, array('rpc', 'rest'))) {
             $linkType .= '-service';
         }
-        $routeName    = sprintf('zf-apigility-admin/api/module/%s', $linkType);
+        $routeName    = sprintf('zf-apigility/api/module/%s', $linkType);
         $routeParams  = array();
         $routeOptions = array();
         if (null !== $module) {
@@ -401,5 +594,39 @@ class Module
 
         $link = Link::factory($spec);
         $links->add($link);
+    }
+
+    protected function getServiceType($service)
+    {
+        if (strstr($service, '\\Rest\\')) {
+            return 'rest';
+        }
+        return 'rpc';
+    }
+
+    /**
+     * Disable opcode caching
+     *
+     * Disables opcode caching for opcode caches that allow doing so during
+     * runtime; the admin API will not work with opcode caching enabled.
+     */
+    protected function disableOpCache()
+    {
+        if (isset($_SERVER['SERVER_SOFTWARE'])
+            && preg_match('/^PHP .*? Development Server$/', $_SERVER['SERVER_SOFTWARE'])
+        ) {
+            // skip the built-in PHP webserver (OPcache reset is not needed +
+            // it crashes the server in PHP 5.4 with ZendOptimizer+)
+            return;
+        }
+
+        // Disable opcode caches that allow runtime disabling
+        if (function_exists('xcache_get')) {
+            // XCache; just disable it
+            ini_set('xcache.cacher', '0');
+        } elseif (function_exists('wincache_ocache_meminfo')) {
+            // WinCache; just disable it
+            ini_set('wincache.ocenabled', '0');
+        }
     }
 }
