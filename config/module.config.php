@@ -5,20 +5,6 @@
  */
 
 return array(
-    'asset_manager' => array(
-        'resolver_configs' => array(
-            'paths' => array(
-                __DIR__ . '/../asset/dist',
-            ),
-        ),
-    ),
-
-    'view_manager' => array(
-        'template_map' => array(
-            'zf/app/app' => __DIR__ . '/../view/app.phtml',
-        )
-    ),
-
     'service_manager' => array(
         'invokables' => array(
             'ZF\Apigility\Admin\Listener\CryptFilterListener' => 'ZF\Apigility\Admin\Listener\CryptFilterListener',
@@ -600,6 +586,7 @@ return array(
             'ZF\Apigility\Admin\Model\ModuleEntity' => array(
                 'hydrator'        => 'ArraySerializable',
                 'route_identifier_name' => 'name',
+                'entity_identifier_name' => 'name',
                 'route_name'      => 'zf-apigility/api/module',
             ),
             'ZF\Apigility\Admin\Model\RestInputFilterCollection' => array(

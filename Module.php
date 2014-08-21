@@ -6,6 +6,9 @@
 
 namespace ZF\Apigility\Admin;
 
+use Zend\Http\Header\GenericHeader;
+use Zend\Http\Header\GenericMultiHeader;
+use Zend\ModuleManager\ModuleManagerInterface;
 use Zend\Mvc\MvcEvent;
 use Zend\Mvc\Router\RouteMatch;
 use ZF\Configuration\ConfigResource;
@@ -32,11 +35,29 @@ class Module
      */
     protected $sm;
 
+    /**
+     * Ensure the UI module is loaded
+     *
+     * @param ModuleManagerInterface $modules
+     */
+    public function init(ModuleManagerInterface $modules)
+    {
+        $loaded = $modules->getLoadedModules();
+        if (isset($loaded['ZF\Apigility\Admin\Ui'])) {
+            return;
+        }
+
+        $modules->loadModule('ZF\Apigility\Admin\Ui');
+    }
+
     public function onBootstrap(MvcEvent $e)
     {
         $app      = $e->getApplication();
         $this->sm = $app->getServiceManager();
         $events   = $app->getEventManager();
+        $events->attach(MvcEvent::EVENT_ROUTE, array($this, 'normalizeMatchedControllerServiceName'), -20);
+        $events->attach(MvcEvent::EVENT_ROUTE, array($this, 'normalizeMatchedInputFilterName'), -20);
+        $events->attach(MvcEvent::EVENT_ROUTE, array($this, 'onRoute'), -1000);
         $events->attach(MvcEvent::EVENT_RENDER, array($this, 'onRender'), 100);
         $events->attach(MvcEvent::EVENT_FINISH, array($this, 'onFinish'), 1000);
         $events->attachAggregate(
@@ -313,6 +334,52 @@ class Module
         ));
     }
 
+    public function normalizeMatchedControllerServiceName($e)
+    {
+        $matches = $e->getRouteMatch();
+        if (! $matches || ! $matches->getParam('controller_service_name')) {
+            return;
+        }
+
+        // Replace '-' with namespace separator
+        $controller = $matches->getParam('controller_service_name');
+        $matches->setParam('controller_service_name', str_replace('-', '\\', $controller));
+    }
+
+    public function normalizeMatchedInputFilterName($e)
+    {
+        $matches = $e->getRouteMatch();
+        if (! $matches || ! $matches->getParam('input_filter_name')) {
+            return;
+        }
+
+        // Replace '-' with namespace separator
+        $controller = $matches->getParam('input_filter_name');
+        $matches->setParam('input_filter_name', str_replace('-', '\\', $controller));
+    }
+
+    /**
+     * Ensure the render_collections flag of the HAL view helper is enabled
+     * regardless of the configuration setting if we match an admin service.
+     *
+     * @param MvcEvent $e
+     */
+    public function onRoute(MvcEvent $e)
+    {
+        $matches = $e->getRouteMatch();
+        if (! $matches
+            || 0 !== strpos($matches->getParam('controller'), 'ZF\Apigility\Admin\\')
+        ) {
+            return;
+        }
+
+        $app      = $e->getTarget();
+        $services = $app->getServiceManager();
+        $helpers  = $services->get('ViewHelperManager');
+        $hal      = $helpers->get('Hal');
+        $hal->setRenderCollections(true);
+    }
+
     /**
      * Inject links into Module resources for the service services
      *
@@ -335,6 +402,18 @@ class Module
         $viewHelpers = $this->sm->get('ViewHelperManager');
         $halPlugin = $viewHelpers->get('hal');
         $this->initializeUrlHelper();
+
+        $halPlugin->getEventManager()->attach(
+            array('renderCollection', 'renderEntity', 'renderCollection.Entity'),
+            function ($e) use ($matches) {
+                if ($matches->getParam('controller_service_name')) {
+                    $matches->setParam(
+                        'controller_service_name',
+                        str_replace('\\', '-', $matches->getParam('controller_service_name'))
+                    );
+                }
+            }
+        );
 
         if ($result->isEntity()) {
             $this->injectServiceLinks($result->getPayload(), $result, $e);
@@ -367,8 +446,10 @@ class Module
             return;
         }
 
-        $response = $e->getResponse();
-        $response->getHeaders()->addHeaderLine('Cache-Control', 'no-cache');
+        $request = $e->getRequest();
+        if ($request->isGet() || $request->isHead()) {
+            $this->disableHttpCache($e->getResponse()->getHeaders());
+        }
     }
 
     protected function initializeUrlHelper()
@@ -399,6 +480,12 @@ class Module
         if ($entity instanceof Model\ModuleEntity) {
             return $this->injectModuleResourceRelationalLinks($entity, $links, $model);
         }
+        if ($entity instanceof Model\RestServiceEntity || $entity instanceof Model\RpcServiceEntity) {
+            return $this->normalizeEntityControllerServiceName($entity, $links, $model);
+        }
+        if ($entity instanceof Model\InputFilterEntity) {
+            return $this->normalizeEntityInputFilterName($entity, $links, $model);
+        }
     }
 
     protected function injectModuleResourceRelationalLinks(Model\ModuleEntity $module, $links, HalJsonModel $model)
@@ -421,20 +508,48 @@ class Module
         $model->setPayload($replacement);
     }
 
+    protected function normalizeEntityControllerServiceName($entity, $links, HalJsonModel $model)
+    {
+        $entity->exchangeArray(array(
+            'controller_service_name' => str_replace('\\', '-', $entity->controllerServiceName),
+        ));
+        $halEntity = new Entity($entity, $entity->controllerServiceName);
+
+        if ($links->has('self')) {
+            $links->remove('self');
+        }
+        $halEntity->setLinks($links);
+
+        $model->setPayload($halEntity);
+    }
+
+    protected function normalizeEntityInputFilterName(Model\InputFilterEntity $entity, $links, HalJsonModel $model)
+    {
+        $entity['input_filter_name'] = str_replace('\\', '-', $entity['input_filter_name']);
+        $halEntity = new Entity($entity, $entity['input_filter_name']);
+
+        if ($links->has('self')) {
+            $links->remove('self');
+        }
+        $halEntity->setLinks($links);
+
+        $model->setPayload($halEntity);
+    }
+
     public function onRenderEntity($e)
     {
         $halEntity = $e->getParam('entity');
         $entity    = $halEntity->entity;
+        $hal       = $e->getTarget();
 
         if ($entity instanceof Model\RestServiceEntity
             || $entity instanceof Model\RpcServiceEntity
             || (is_array($entity) && array_key_exists('controller_service_name', $entity))
         ) {
-            $links = $halEntity->getLinks();
+            $serviceName = is_array($entity) ? $entity['controller_service_name'] : $entity->controllerServiceName;
+            $links       = $halEntity->getLinks();
 
             if ($links->has('input_filter')) {
-                $serviceName = is_array($entity) ? $entity['controller_service_name'] : $entity->controllerServiceName;
-
                 $link   = $links->get('input_filter');
                 $params = $link->getRouteParams();
                 $link->setRouteParams(array_merge($params, array(
@@ -443,14 +558,39 @@ class Module
             }
 
             if ($links->has('documentation')) {
-                $serviceName = is_array($entity) ? $entity['controller_service_name'] : $entity->controllerServiceName;
-
                 $link   = $links->get('documentation');
                 $params = $link->getRouteParams();
                 $link->setRouteParams(array_merge($params, array(
                     'controller_service_name' => $serviceName
                 )));
             }
+
+            if (! $links->has('self')) {
+                $route  = 'zf-apigility/api/module/';
+                $route .= $entity instanceof Model\RestServiceEntity ? 'rest-service' : 'rpc-service';
+                $hal->injectSelfLink($halEntity, $route, 'controller_service_name');
+            }
+            return;
+        }
+
+        if ($entity instanceof Model\InputFilterEntity
+            || (is_array($entity) && isset($entity['input_filter_name']))
+        ) {
+            switch (true) {
+                case ($entity instanceof Model\RestInputFilterEntity):
+                    $type = 'rest-service';
+                    break;
+                case ($entity instanceof Model\RpcInputFilterEntity):
+                    $type = 'rpc-service';
+                    break;
+            }
+            $links       = $halEntity->getLinks();
+
+            if (! $links->has('self')) {
+                $route  = sprintf('zf-apigility/api/module/%s/input-filter', $type);
+                $hal->injectSelfLink($halEntity, $route, 'input_filter_name');
+            }
+            return;
         }
     }
 
@@ -473,6 +613,10 @@ class Module
             || $entity instanceof Model\RpcServiceEntity
         ) {
             return $this->injectServiceCollectionRelationalLinks($entity, $e);
+        }
+
+        if ($entity instanceof Model\InputFilterEntity) {
+            return $this->normalizeInputFilterEntityName($entity, $e);
         }
     }
 
@@ -512,6 +656,10 @@ class Module
 
     public function injectServiceCollectionRelationalLinks($entity, $e)
     {
+        $entity->exchangeArray(array(
+            'controller_service_name' => str_replace('\\', '-', $entity->controllerServiceName),
+        ));
+
         $module  = $this->mvcEvent->getRouteMatch()->getParam('name');
         $service = $entity->controllerServiceName;
         $type    = $this->getServiceType($service);
@@ -557,6 +705,12 @@ class Module
         )));
 
         $e->setParam('entity', $halEntity);
+    }
+
+    protected function normalizeInputFilterEntityName($entity, $e)
+    {
+        $entity['input_filter_name'] = str_replace('\\', '-', $entity['input_filter_name']);
+        $e->setParam('entity', $entity);
     }
 
     /**
@@ -628,5 +782,21 @@ class Module
             // WinCache; just disable it
             ini_set('wincache.ocenabled', '0');
         }
+    }
+
+    /**
+     * Prepare cache-busting headers for GET requests
+     *
+     * Invoked from the onFinish() method for GET requests to disable client-side HTTP caching.
+     *
+     * @param \Zend\Http\Headers $headers
+     */
+    protected function disableHttpCache($headers)
+    {
+        $headers->addHeader(new GenericHeader('Expires', '0'));
+        // $headers->addHeaderLine('Last-Modified', gmdate('D, d M Y H:i:s') . ' GMT');
+        $headers->addHeader(new GenericMultiHeader('Cache-Control', 'no-store, no-cache, must-revalidate'));
+        $headers->addHeader(new GenericMultiHeader('Cache-Control', 'post-check=0, pre-check=0'));
+        $headers->addHeaderLine('Pragma', 'no-cache');
     }
 }
